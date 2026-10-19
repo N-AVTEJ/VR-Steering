@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.camera import Camera
 from src.vision import Vision
 from src.gestures import is_fist, is_open_palm
+from src.driving import DrivingController, DrivingState
 
 
 def _get_hand_x(hand_landmarks) -> float:
@@ -26,13 +27,14 @@ def _get_hand_x(hand_landmarks) -> float:
 def main() -> None:
     camera = None
     vision = None
+    driving_controller = DrivingController()
 
     try:
         camera = Camera()
         vision = Vision()
 
         print("VisionDrive-AI started.")
-        print("Press 'q' in the video window to exit.")
+        print("Controls: 'c' = Calibrate neutral steering, 'q' = Quit")
 
         prev_time = time.time()
         fps = 0.0
@@ -70,13 +72,21 @@ def main() -> None:
             rightmost = None
             if len(hands) == 1:
                 hand_x = _get_hand_x(hands[0])
-                if hand_x < 0.5:
+                if driving_controller.is_calibrated and abs(hand_x - driving_controller.neutral_x) < 0.35:
+                    leftmost = hands[0]
+                elif hand_x < 0.5:
                     leftmost = hands[0]
                 else:
                     rightmost = hands[0]
             elif len(hands) >= 2:
                 leftmost = hands[0]
                 rightmost = hands[-1]
+
+            # Update driving controller (steering, smoothing, tracking-loss, state, active keys)
+            state = driving_controller.update(leftmost_hand=leftmost, rightmost_hand=rightmost)
+            smoothed_steer = driving_controller.smoothed_steering
+            active_keys = driving_controller.get_active_keys()
+            keys_str = ", ".join(active_keys) if active_keys else "None"
 
             # Console output
             left_str = (
@@ -90,8 +100,10 @@ def main() -> None:
                 else "None"
             )
             print(
-                f"[Hands: {len(hands)}] Leftmost -> {left_str} | "
-                f"Rightmost -> {right_str} | FPS: {fps:.1f}"
+                f"[Hands: {len(hands)}] State: {state.value:<7} | "
+                f"Steer: {smoothed_steer:+.2f} | "
+                f"Keys: [{keys_str}] | "
+                f"Left -> {left_str} | Right -> {right_str} | FPS: {fps:.1f}"
             )
 
             # Draw landmarks on frame
@@ -102,10 +114,56 @@ def main() -> None:
             cv2.putText(
                 frame,
                 fps_text,
-                (15, 35),
+                (15, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
+                0.7,
                 (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+            # State color coding
+            state_colors = {
+                DrivingState.DRIVING: (0, 255, 0),      # Green
+                DrivingState.BRAKING: (0, 0, 255),      # Red
+                DrivingState.READY: (0, 255, 255),      # Yellow
+                DrivingState.NEUTRAL: (180, 180, 180),  # Gray
+            }
+            state_color = state_colors.get(state, (255, 255, 255))
+
+            # On-screen HUD overlays
+            state_text = f"STATE: {state.value}"
+            cv2.putText(
+                frame,
+                state_text,
+                (15, 65),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                state_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+            steer_text = f"STEER: {smoothed_steer:+.2f} (Neutral: {driving_controller.neutral_x:.2f})"
+            cv2.putText(
+                frame,
+                steer_text,
+                (15, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+            keys_display = f"VIRTUAL KEYS: [{keys_str}]"
+            cv2.putText(
+                frame,
+                keys_display,
+                (15, 135),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 255) if active_keys else (180, 180, 180),
                 2,
                 cv2.LINE_AA,
             )
@@ -114,41 +172,61 @@ def main() -> None:
             if leftmost is not None:
                 l_f = is_fist(leftmost)
                 l_p = is_open_palm(leftmost)
-                status_l = f"L: {'FIST' if l_f else ('PALM' if l_p else 'NONE')}"
+                status_l = f"L (Steer): {'FIST' if l_f else ('PALM' if l_p else 'NONE')}"
                 cv2.putText(
                     frame,
                     status_l,
-                    (15, 75),
+                    (15, 170),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
+                    0.6,
+                    (200, 200, 200),
+                    1,
                     cv2.LINE_AA,
                 )
 
             if rightmost is not None:
                 r_f = is_fist(rightmost)
                 r_p = is_open_palm(rightmost)
-                status_r = f"R: {'FIST' if r_f else ('PALM' if r_p else 'NONE')}"
-                y_pos = 110 if leftmost is not None else 75
+                status_r = f"R (Brake): {'FIST' if r_f else ('PALM' if r_p else 'NONE')}"
+                y_pos = 195 if leftmost is not None else 170
                 cv2.putText(
                     frame,
                     status_r,
                     (15, y_pos),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
+                    0.6,
+                    (200, 200, 200),
+                    1,
                     cv2.LINE_AA,
                 )
+
+            # Instructions overlay at bottom
+            cv2.putText(
+                frame,
+                "'c': Calibrate neutral | 'q': Quit",
+                (15, 460),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (180, 180, 180),
+                1,
+                cv2.LINE_AA,
+            )
 
             # Display output
             cv2.imshow("VisionDrive-AI", frame)
 
-            # Exit on 'q'
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            # Process key events: 'q' to quit, 'c' to calibrate neutral_x
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 print("Quit requested by user.")
                 break
+            elif key == ord("c"):
+                calib_hand = leftmost if leftmost is not None else (hands[0] if hands else None)
+                if calib_hand is not None:
+                    new_neutral = driving_controller.calibrate(calib_hand)
+                    print(f"[CALIBRATION] Neutral X calibrated to: {new_neutral:.3f}")
+                else:
+                    print("[CALIBRATION] Warning: No hand detected to calibrate neutral position.")
 
     except Exception as exc:
         print(f"Error in VisionDrive-AI: {exc}", file=sys.stderr)

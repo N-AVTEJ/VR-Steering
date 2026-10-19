@@ -21,6 +21,22 @@ from src.gestures import (
     is_fist,
     is_open_palm,
 )
+from src.driving import (
+    DrivingController,
+    DrivingState,
+    NEUTRAL,
+    READY,
+    DRIVING,
+    BRAKING,
+    clamp,
+    get_hand_x,
+    apply_deadzone,
+    apply_ema,
+    calculate_raw_steering,
+    calculate_steering,
+    calibrate,
+    update,
+)
 
 
 class LandmarkMock:
@@ -67,6 +83,23 @@ def create_dummy_hand(finger_ratios_target: dict) -> HandLandmarksMock:
     return HandLandmarksMock(landmarks)
 
 
+def create_test_hand(x: float = 0.5, gesture: str = "relaxed") -> HandLandmarksMock:
+    """Construct a mock hand at horizontal position x with specified gesture."""
+    if gesture == "fist":
+        ratios = {"index": 0.5, "middle": 0.5, "ring": 0.5, "pinky": 0.5}
+    elif gesture == "palm":
+        ratios = {"index": 2.0, "middle": 2.0, "ring": 2.0, "pinky": 2.0}
+    else:  # relaxed / neutral
+        ratios = {"index": 0.95, "middle": 0.95, "ring": 0.95, "pinky": 0.95}
+
+    hand = create_dummy_hand(ratios)
+    current_avg_x = sum(lm.x for lm in hand.landmark) / len(hand.landmark)
+    offset_x = x - current_avg_x
+    for lm in hand.landmark:
+        lm.x += offset_x
+    return hand
+
+
 class TestConfig(unittest.TestCase):
     """Test configuration constants."""
 
@@ -78,6 +111,11 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.CAMERA_WIDTH, 640)
         self.assertEqual(config.CAMERA_HEIGHT, 480)
         self.assertEqual(config.CAMERA_INDEX, 0)
+        self.assertEqual(config.STEER_SENSITIVITY, 2.5)
+        self.assertEqual(config.EMA_ALPHA, 0.35)
+        self.assertEqual(config.LOSS_FRAMES_LIMIT, 8)
+        self.assertEqual(config.STEER_DEADZONE, 0.08)
+        self.assertEqual(config.STEER_FIRE_THRESHOLD, 0.18)
 
 
 class TestGestures(unittest.TestCase):
@@ -344,6 +382,325 @@ class TestVision(unittest.TestCase):
         vision.close()
 
 
+class TestDriving(unittest.TestCase):
+    """Test driving control, steering calculation, EMA smoothing, tracking loss, and state machine."""
+
+    def setUp(self):
+        self.controller = DrivingController()
+
+    def test_clamp_helper(self):
+        self.assertEqual(clamp(0.5, -1.0, 1.0), 0.5)
+        self.assertEqual(clamp(1.5, -1.0, 1.0), 1.0)
+        self.assertEqual(clamp(-1.5, -1.0, 1.0), -1.0)
+        self.assertEqual(clamp(5.0, 0.0, 10.0), 5.0)
+        self.assertEqual(clamp(-1.0, 0.0, 10.0), 0.0)
+
+    def test_get_hand_x_helper(self):
+        self.assertEqual(get_hand_x(0.42), 0.42)
+        self.assertEqual(get_hand_x(None), 0.5)
+        self.assertEqual(get_hand_x([]), 0.5)
+        hand = HandLandmarksMock([LandmarkMock(0.35, 0.5) for _ in range(21)])
+        self.assertAlmostEqual(get_hand_x(hand), 0.35)
+
+    def test_apply_deadzone(self):
+        # Strictly below deadzone (0.08) -> ignored (0.0)
+        self.assertEqual(apply_deadzone(0.05, 0.08), 0.0)
+        self.assertEqual(apply_deadzone(-0.05, 0.08), 0.0)
+        self.assertEqual(apply_deadzone(0.0, 0.08), 0.0)
+        # Equal to or above deadzone -> preserved
+        self.assertEqual(apply_deadzone(0.08, 0.08), 0.08)
+        self.assertEqual(apply_deadzone(0.25, 0.08), 0.25)
+        self.assertEqual(apply_deadzone(-0.25, 0.08), -0.25)
+
+    def test_apply_ema(self):
+        # smoothed = alpha * curr + (1 - alpha) * prev
+        # 0.35 * 1.0 + 0.65 * 0.0 = 0.35
+        self.assertAlmostEqual(apply_ema(1.0, 0.0, 0.35), 0.35)
+        # Next frame: 0.35 * 1.0 + 0.65 * 0.35 = 0.35 + 0.2275 = 0.5775
+        self.assertAlmostEqual(apply_ema(1.0, 0.35, 0.35), 0.5775)
+
+    def test_steering_formula_and_clamping(self):
+        # neutral_x = 0.5, STEER_SENSITIVITY = 2.5
+        # hand_x = 0.5 -> raw = 0.0
+        self.assertAlmostEqual(calculate_raw_steering(0.5, 0.5, 2.5), 0.0)
+        # hand_x = 0.7 -> (0.7 - 0.5) * 2.5 = 0.50
+        self.assertAlmostEqual(calculate_raw_steering(0.7, 0.5, 2.5), 0.50)
+        # hand_x = 0.3 -> (0.3 - 0.5) * 2.5 = -0.50
+        self.assertAlmostEqual(calculate_raw_steering(0.3, 0.5, 2.5), -0.50)
+        # Clamping at +1.0 for large displacement
+        self.assertEqual(calculate_raw_steering(1.0, 0.5, 2.5), 1.0)
+        # Clamping at -1.0 for large displacement
+        self.assertEqual(calculate_raw_steering(0.0, 0.5, 2.5), -1.0)
+
+    def test_calibration_sets_neutral_and_recenters_steering(self):
+        ctrl = DrivingController(neutral_x=0.5)
+        # Give it some smoothed steering
+        hand_steer = create_test_hand(x=0.75, gesture="relaxed")
+        ctrl.update(leftmost_hand=hand_steer)
+        self.assertGreater(ctrl.smoothed_steering, 0.0)
+
+        # Calibrate with hand at x=0.75
+        calibrated_val = ctrl.calibrate(hand_steer)
+        self.assertAlmostEqual(calibrated_val, 0.75, places=2)
+        self.assertAlmostEqual(ctrl.neutral_x, 0.75, places=2)
+        # Steering must be recentered to 0 immediately
+        self.assertEqual(ctrl.smoothed_steering, 0.0)
+
+        # Calling calibrate with None does not crash or overwrite neutral
+        ctrl.calibrate(None)
+        self.assertAlmostEqual(ctrl.neutral_x, 0.75, places=2)
+
+    def test_steering_smoothing_persists_across_frames(self):
+        ctrl = DrivingController(neutral_x=0.5, ema_alpha=0.35)
+        # Step input hand at x=0.7 -> raw clamped is (0.7 - 0.5) * 2.5 = 0.5
+        hand = create_test_hand(x=0.7, gesture="relaxed")
+
+        # Frame 1: smoothed = 0.35 * 0.5 + 0.65 * 0.0 = 0.175
+        ctrl.update(leftmost_hand=hand)
+        val1 = ctrl.smoothed_steering
+        self.assertAlmostEqual(val1, 0.175, places=2)
+
+        # Frame 2: smoothed = 0.35 * 0.5 + 0.65 * 0.175 = 0.28875
+        ctrl.update(leftmost_hand=hand)
+        val2 = ctrl.smoothed_steering
+        self.assertAlmostEqual(val2, 0.28875, places=2)
+        self.assertGreater(val2, val1)
+
+        # Frame 3: continues smoothly towards 0.5
+        ctrl.update(leftmost_hand=hand)
+        val3 = ctrl.smoothed_steering
+        self.assertGreater(val3, val2)
+
+    def test_deadzone_and_virtual_keys_firing(self):
+        ctrl = DrivingController(
+            neutral_x=0.5,
+            steer_sensitivity=2.5,
+            steer_deadzone=0.08,
+            steer_fire_threshold=0.18,
+        )
+        # 1. Hand within deadzone: hand_x = 0.52 -> (0.52 - 0.5) * 2.5 = 0.05 < 0.08
+        hand_deadzone = create_test_hand(x=0.52, gesture="relaxed")
+        ctrl.update(leftmost_hand=hand_deadzone)
+        self.assertEqual(ctrl.smoothed_steering, 0.0)
+        self.assertNotIn("d", ctrl.active_keys)
+        self.assertNotIn("a", ctrl.active_keys)
+
+        # 2. Hand beyond deadzone but smoothed value below fire threshold (0.18)
+        # hand_x = 0.55 -> raw = (0.55 - 0.5) * 2.5 = 0.125 (> 0.08)
+        hand_small = create_test_hand(x=0.55, gesture="relaxed")
+        ctrl.update(leftmost_hand=hand_small)
+        # On frame 1: smoothed = 0.35 * 0.125 = 0.04375 (< 0.18)
+        self.assertGreater(ctrl.smoothed_steering, 0.0)
+        self.assertLess(ctrl.smoothed_steering, 0.18)
+        self.assertNotIn("d", ctrl.active_keys)
+
+        # 3. Hand far right: hand_x = 0.8 -> raw = 0.75
+        # Repeat until smoothed exceeds 0.18
+        hand_right = create_test_hand(x=0.8, gesture="relaxed")
+        for _ in range(5):
+            ctrl.update(leftmost_hand=hand_right)
+        self.assertGreater(ctrl.smoothed_steering, 0.18)
+        self.assertIn("d", ctrl.active_keys)
+        self.assertNotIn("a", ctrl.active_keys)
+
+        # 4. Hand far left: hand_x = 0.2 -> raw = -0.75
+        hand_left = create_test_hand(x=0.2, gesture="relaxed")
+        for _ in range(10):
+            ctrl.update(leftmost_hand=hand_left)
+        self.assertLess(ctrl.smoothed_steering, -0.18)
+        self.assertIn("a", ctrl.active_keys)
+        self.assertNotIn("d", ctrl.active_keys)
+
+    def test_tracking_loss_grace_period_and_limit(self):
+        ctrl = DrivingController(loss_frames_limit=8)
+        hand = create_test_hand(x=0.8, gesture="fist")
+        ctrl.update(leftmost_hand=hand)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertGreater(ctrl.smoothed_steering, 0.0)
+
+        # Frames 1 through 7: tracking loss grace period
+        for frame_idx in range(1, 8):
+            ctrl.update(leftmost_hand=None)
+            self.assertEqual(ctrl.loss_frame_count, frame_idx)
+            self.assertEqual(ctrl.state, DrivingState.DRIVING)
+            self.assertGreater(ctrl.smoothed_steering, 0.0)
+
+        # Frame 8: reaches LOSS_FRAMES_LIMIT=8 consecutive frames
+        ctrl.update(leftmost_hand=None)
+        self.assertEqual(ctrl.loss_frame_count, 8)
+        self.assertEqual(ctrl.state, DrivingState.NEUTRAL)
+        self.assertEqual(ctrl.smoothed_steering, 0.0)
+        self.assertEqual(ctrl.active_keys, [])
+
+        # Recovery when hand returns
+        ctrl.update(leftmost_hand=hand)
+        self.assertEqual(ctrl.loss_frame_count, 0)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+
+    def test_state_machine_driving_fist(self):
+        ctrl = DrivingController()
+        left_fist = create_test_hand(x=0.5, gesture="fist")
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=None)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertIn("w", ctrl.active_keys)
+        self.assertNotIn("s", ctrl.active_keys)
+
+    def test_state_machine_braking_open_palm(self):
+        ctrl = DrivingController()
+        left_hand = create_test_hand(x=0.3, gesture="relaxed")
+        right_palm = create_test_hand(x=0.7, gesture="palm")
+        ctrl.update(leftmost_hand=left_hand, rightmost_hand=right_palm)
+        self.assertEqual(ctrl.state, DrivingState.BRAKING)
+        self.assertIn("s", ctrl.active_keys)
+        self.assertNotIn("w", ctrl.active_keys)
+
+    def test_state_machine_braking_overrides_driving(self):
+        # Both fist condition (steering hand) and brake condition (brake hand) true
+        ctrl = DrivingController()
+        left_fist = create_test_hand(x=0.3, gesture="fist")
+        right_palm = create_test_hand(x=0.7, gesture="palm")
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_palm)
+        # Braking MUST override driving!
+        self.assertEqual(ctrl.state, DrivingState.BRAKING)
+        self.assertIn("s", ctrl.active_keys)
+        self.assertNotIn("w", ctrl.active_keys)
+
+    def test_state_machine_ambiguous_both_fists_shows_ready(self):
+        ctrl = DrivingController()
+        left_fist = create_test_hand(x=0.3, gesture="fist")
+        right_fist = create_test_hand(x=0.7, gesture="fist")
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_fist)
+        # Both fists -> ambiguous input -> READY (no throttle, no brake)
+        self.assertEqual(ctrl.state, DrivingState.READY)
+        self.assertNotIn("w", ctrl.active_keys)
+        self.assertNotIn("s", ctrl.active_keys)
+
+    def test_state_machine_ambiguous_both_palms_shows_ready(self):
+        ctrl = DrivingController()
+        left_palm = create_test_hand(x=0.3, gesture="palm")
+        right_palm = create_test_hand(x=0.7, gesture="palm")
+        ctrl.update(leftmost_hand=left_palm, rightmost_hand=right_palm)
+        # Both palms -> ambiguous input -> READY (no throttle, no brake)
+        self.assertEqual(ctrl.state, DrivingState.READY)
+        self.assertNotIn("w", ctrl.active_keys)
+        self.assertNotIn("s", ctrl.active_keys)
+
+    def test_state_machine_initial_neutral_before_any_hand(self):
+        ctrl = DrivingController()
+        self.assertEqual(ctrl.state, DrivingState.NEUTRAL)
+        ctrl.update(leftmost_hand=None, rightmost_hand=None)
+        self.assertEqual(ctrl.state, DrivingState.NEUTRAL)
+        self.assertEqual(ctrl.active_keys, [])
+
+    def test_state_transitions_between_driving_braking_and_ready(self):
+        ctrl = DrivingController()
+        left_fist = create_test_hand(x=0.3, gesture="fist")
+        right_palm = create_test_hand(x=0.7, gesture="palm")
+        right_fist = create_test_hand(x=0.7, gesture="fist")
+        left_relaxed = create_test_hand(x=0.3, gesture="relaxed")
+
+        # 1. Start in READY
+        ctrl.update(leftmost_hand=left_relaxed)
+        self.assertEqual(ctrl.state, DrivingState.READY)
+
+        # 2. Transition READY -> DRIVING
+        ctrl.update(leftmost_hand=left_fist)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+
+        # 3. Transition DRIVING -> BRAKING directly (right hand raises palm)
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_palm)
+        self.assertEqual(ctrl.state, DrivingState.BRAKING)
+
+        # 4. Transition BRAKING -> DRIVING directly (right hand lowers)
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=None)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+
+        # 5. Transition DRIVING -> READY (right hand closes into fist -> both fists)
+        ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_fist)
+        self.assertEqual(ctrl.state, DrivingState.READY)
+
+    def test_camera_covered_30_frames_forces_neutral(self):
+        ctrl = DrivingController(loss_frames_limit=8)
+        left_fist = create_test_hand(x=0.8, gesture="fist")
+        # Drive for a few frames
+        for _ in range(5):
+            ctrl.update(leftmost_hand=left_fist)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertGreater(ctrl.smoothed_steering, 0.0)
+
+        # Cover camera for ~1 second (30 frames at 30 fps)
+        for _ in range(30):
+            ctrl.update(leftmost_hand=None, rightmost_hand=None)
+
+        self.assertEqual(ctrl.state, DrivingState.NEUTRAL)
+        self.assertEqual(ctrl.smoothed_steering, 0.0)
+        self.assertEqual(ctrl.active_keys, [])
+
+        # Uncover camera -> hand appears -> recovers to DRIVING
+        ctrl.update(leftmost_hand=left_fist)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+
+    def test_extreme_hand_positions_strictly_clamped(self):
+        ctrl = DrivingController(neutral_x=0.5, steer_sensitivity=2.5)
+        # Position far to the right: x = 2.0
+        hand_extreme_right = create_test_hand(x=2.0, gesture="relaxed")
+        for _ in range(15):
+            ctrl.update(leftmost_hand=hand_extreme_right)
+        self.assertAlmostEqual(ctrl.smoothed_steering, 1.0, places=2)
+        self.assertLessEqual(ctrl.smoothed_steering, 1.0)
+
+        # Position far to the left: x = -1.0
+        hand_extreme_left = create_test_hand(x=-1.0, gesture="relaxed")
+        for _ in range(25):
+            ctrl.update(leftmost_hand=hand_extreme_left)
+        self.assertAlmostEqual(ctrl.smoothed_steering, -1.0, places=2)
+        self.assertGreaterEqual(ctrl.smoothed_steering, -1.0)
+
+    def test_driving_and_braking_combined_with_steering_keys(self):
+        ctrl = DrivingController(neutral_x=0.5, steer_sensitivity=2.5, steer_fire_threshold=0.18)
+
+        # DRIVING + steer right -> ['d', 'w']
+        hand_fist_right = create_test_hand(x=0.8, gesture="fist")
+        for _ in range(10):
+            ctrl.update(leftmost_hand=hand_fist_right)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertEqual(ctrl.active_keys, ["d", "w"])
+
+        # DRIVING + steer left -> ['a', 'w']
+        hand_fist_left = create_test_hand(x=0.2, gesture="fist")
+        for _ in range(15):
+            ctrl.update(leftmost_hand=hand_fist_left)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertEqual(ctrl.active_keys, ["a", "w"])
+
+        # BRAKING + steer right -> ['d', 's']
+        hand_steer_right = create_test_hand(x=0.8, gesture="relaxed")
+        hand_brake = create_test_hand(x=0.7, gesture="palm")
+        for _ in range(15):
+            ctrl.update(leftmost_hand=hand_steer_right, rightmost_hand=hand_brake)
+        self.assertEqual(ctrl.state, DrivingState.BRAKING)
+        self.assertEqual(ctrl.active_keys, ["d", "s"])
+
+    def test_module_level_convenience_functions(self):
+        from src import driving
+        driving.reset_controller()
+
+        self.assertEqual(driving.get_driving_state(), DrivingState.NEUTRAL)
+        self.assertEqual(driving.get_smoothed_steering(), 0.0)
+
+        # Calibrate
+        driving.calibrate(0.4)
+        self.assertAlmostEqual(driving._default_controller.neutral_x, 0.4)
+
+        driving.set_neutral_x(0.35)
+        self.assertAlmostEqual(driving._default_controller.neutral_x, 0.35)
+
+        hand = create_test_hand(x=0.35, gesture="fist")
+        st = driving.update(leftmost_hand=hand)
+        self.assertEqual(st, DrivingState.DRIVING)
+        self.assertIn("w", driving.get_active_keys())
+
+
 class TestMainLogic(unittest.TestCase):
     """Test helper logic and workflow of main.py."""
 
@@ -378,6 +735,39 @@ class TestMainLogic(unittest.TestCase):
         mock_cam_inst.release.assert_called_once()
         mock_vis_inst.close.assert_called_once()
         mock_destroy.assert_called_once()
+
+    @patch("cv2.destroyAllWindows")
+    @patch("cv2.imshow")
+    @patch("cv2.waitKey", side_effect=[ord("c"), ord("q")])
+    @patch("main.Camera")
+    @patch("main.Vision")
+    def test_main_keypress_c_calibrates(
+        self, mock_vision_cls, mock_camera_cls, mock_waitkey, mock_imshow, mock_destroy
+    ):
+        import main
+
+        mock_cam_inst = MagicMock()
+        mock_cam_inst.read.return_value = (True, np.zeros((480, 640, 3), dtype=np.uint8))
+        mock_camera_cls.return_value = mock_cam_inst
+
+        mock_vis_inst = MagicMock()
+        hand = HandLandmarksMock([LandmarkMock(0.35, 0.5) for _ in range(21)])
+        mock_vis_inst.process.return_value = [hand]
+        mock_vision_cls.return_value = mock_vis_inst
+
+        with patch("main.DrivingController") as mock_ctrl_cls:
+            mock_ctrl_inst = MagicMock()
+            mock_ctrl_inst.is_calibrated = False
+            mock_ctrl_inst.neutral_x = 0.5
+            mock_ctrl_inst.smoothed_steering = 0.0
+            mock_ctrl_inst.state = DrivingState.READY
+            mock_ctrl_inst.update.return_value = DrivingState.READY
+            mock_ctrl_inst.get_active_keys.return_value = []
+            mock_ctrl_inst.calibrate.return_value = 0.35
+            mock_ctrl_cls.return_value = mock_ctrl_inst
+
+            main.main()
+            mock_ctrl_inst.calibrate.assert_called_once_with(hand)
 
 
 if __name__ == "__main__":
