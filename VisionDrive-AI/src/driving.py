@@ -145,6 +145,7 @@ class DrivingController:
         self.raw_steering = 0.0
         self.loss_frame_count = 0
         self._has_seen_hand = True
+        self.active_keys = [k for k in self.active_keys if k not in ("a", "d")]
         return self.neutral_x
 
     def update(
@@ -164,22 +165,23 @@ class DrivingController:
         Returns:
             Current DrivingState.
         """
-        # Resolve hands if passed as a list
+        # Resolve hands if passed as a sequence
         if hands is not None and leftmost_hand is None and rightmost_hand is None:
-            if len(hands) == 1:
-                hand_x = get_hand_x(hands[0])
-                if abs(hand_x - self.neutral_x) < 0.35 or hand_x < 0.5:
-                    leftmost_hand = hands[0]
-                else:
-                    rightmost_hand = hands[0]
-            elif len(hands) >= 2:
-                leftmost_hand = hands[0]
-                rightmost_hand = hands[-1]
+            leftmost_hand = hands[0] if len(hands) >= 1 else None
+            rightmost_hand = hands[-1] if len(hands) >= 2 else None
 
         # Tracking-loss handling
         if leftmost_hand is None:
+            if not self._has_seen_hand:
+                self.smoothed_steering = 0.0
+                self.raw_steering = 0.0
+                self.active_keys = []
+                self.state = DrivingState.NEUTRAL
+                self.loss_frame_count = 0
+                return self.state
+
             self.loss_frame_count += 1
-            if not self._has_seen_hand or self.loss_frame_count >= self.loss_frames_limit:
+            if self.loss_frame_count >= self.loss_frames_limit:
                 # Force smoothed steering to 0 and clear all active outputs
                 self.smoothed_steering = 0.0
                 self.raw_steering = 0.0

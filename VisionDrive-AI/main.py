@@ -67,20 +67,9 @@ def main() -> None:
             # Vision: process frame (returns hands sorted leftmost to rightmost)
             hands = vision.process(frame)
 
-            # Determine leftmost and rightmost hands based on detections and horizontal position
-            leftmost = None
-            rightmost = None
-            if len(hands) == 1:
-                hand_x = _get_hand_x(hands[0])
-                if driving_controller.is_calibrated and abs(hand_x - driving_controller.neutral_x) < 0.35:
-                    leftmost = hands[0]
-                elif hand_x < 0.5:
-                    leftmost = hands[0]
-                else:
-                    rightmost = hands[0]
-            elif len(hands) >= 2:
-                leftmost = hands[0]
-                rightmost = hands[-1]
+            # Determine leftmost and rightmost hands from sorted detections
+            leftmost = hands[0] if len(hands) >= 1 else None
+            rightmost = hands[-1] if len(hands) >= 2 else None
 
             # Update driving controller (steering, smoothing, tracking-loss, state, active keys)
             state = driving_controller.update(leftmost_hand=leftmost, rightmost_hand=rightmost)
@@ -217,10 +206,10 @@ def main() -> None:
 
             # Process key events: 'q' to quit, 'c' to calibrate neutral_x
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            if key in (ord("q"), ord("Q")):
                 print("Quit requested by user.")
                 break
-            elif key == ord("c"):
+            elif key in (ord("c"), ord("C")):
                 calib_hand = leftmost if leftmost is not None else (hands[0] if hands else None)
                 if calib_hand is not None:
                     new_neutral = driving_controller.calibrate(calib_hand)
