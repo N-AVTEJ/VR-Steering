@@ -42,16 +42,22 @@ class Camera:
         Returns:
             Tuple of (success_flag, flipped_bgr_frame).
         """
-        if self.cap is None or not self.cap.isOpened():
+        if self.cap is None:
             return False, None
 
-        ret, frame = self.cap.read()
-        if not ret or frame is None:
-            return False, None
+        try:
+            if not self.cap.isOpened():
+                return False, None
 
-        # Horizontal flip (mirror view)
-        flipped = cv2.flip(frame, 1)
-        return True, flipped
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                return False, None
+
+            # Horizontal flip (mirror view)
+            flipped = cv2.flip(frame, 1)
+            return True, flipped
+        except Exception:
+            return False, None
 
     def get_frame(self) -> Optional[np.ndarray]:
         """

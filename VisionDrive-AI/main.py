@@ -14,6 +14,7 @@ from src.camera import Camera
 from src.vision import Vision
 from src.gestures import is_fist, is_open_palm
 from src.driving import DrivingController, DrivingState
+from src.controller import KeyboardController
 
 
 def _get_hand_x(hand_landmarks) -> float:
@@ -27,9 +28,11 @@ def _get_hand_x(hand_landmarks) -> float:
 def main() -> None:
     camera = None
     vision = None
+    controller = None
     driving_controller = DrivingController()
 
     try:
+        controller = KeyboardController()
         camera = Camera()
         vision = Vision()
 
@@ -38,23 +41,20 @@ def main() -> None:
 
         prev_time = time.time()
         fps = 0.0
-        consecutive_read_failures = 0
 
         while True:
-            ret, frame = camera.read()
+            try:
+                ret, frame = camera.read()
+            except Exception:
+                ret, frame = False, None
+
             if not ret or frame is None:
-                consecutive_read_failures += 1
-                if consecutive_read_failures % 30 == 1:
-                    print("Warning: Failed to grab frame from camera.")
-                time.sleep(0.03)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("Quit requested by user.")
-                    break
-                if consecutive_read_failures > 100:
-                    print("Camera connection lost or stream ended. Exiting.")
-                    break
-                continue
-            consecutive_read_failures = 0
+                print("Camera disconnected or failed to read frame. Exiting cleanly...")
+                if controller is not None:
+                    controller.release_all()
+                if camera is not None:
+                    camera.release()
+                break
 
             # Calculate FPS
             curr_time = time.time()
@@ -75,6 +75,7 @@ def main() -> None:
             state = driving_controller.update(leftmost_hand=leftmost, rightmost_hand=rightmost)
             smoothed_steer = driving_controller.smoothed_steering
             active_keys = driving_controller.get_active_keys()
+            controller.apply(active_keys)
             keys_str = ", ".join(active_keys) if active_keys else "None"
 
             # Console output
@@ -213,21 +214,39 @@ def main() -> None:
                 calib_hand = leftmost if leftmost is not None else (hands[0] if hands else None)
                 if calib_hand is not None:
                     new_neutral = driving_controller.calibrate(calib_hand)
+                    if controller is not None:
+                        controller.apply(driving_controller.get_active_keys())
                     print(f"[CALIBRATION] Neutral X calibrated to: {new_neutral:.3f}")
                 else:
                     print("[CALIBRATION] Warning: No hand detected to calibrate neutral position.")
 
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user (Ctrl+C). Exiting cleanly...")
     except Exception as exc:
         print(f"Error in VisionDrive-AI: {exc}", file=sys.stderr)
         raise
     finally:
         print("Cleaning up resources...")
+        if controller is not None:
+            try:
+                controller.release_all()
+            except Exception:
+                pass
         if camera is not None:
-            camera.release()
+            try:
+                camera.release()
+            except Exception:
+                pass
         if vision is not None:
-            vision.close()
-        cv2.destroyAllWindows()
-        print("Camera released and windows destroyed.")
+            try:
+                vision.close()
+            except Exception:
+                pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        print("Camera released, keys released, and windows destroyed.")
 
 
 if __name__ == "__main__":
