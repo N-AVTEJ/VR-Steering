@@ -5,7 +5,7 @@ tracking loss handling, virtual keyboard outputs, and state machine.
 """
 
 from enum import Enum
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 try:
     from src.config import (
