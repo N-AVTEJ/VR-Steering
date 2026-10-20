@@ -48,6 +48,17 @@ def clamp(val: float, min_val: float = -1.0, max_val: float = 1.0) -> float:
     return max(min_val, min(max_val, val))
 
 
+def _extract_landmark_coord_x(p: Any) -> float:
+    """Safely extract the horizontal x-coordinate from a landmark or point."""
+    if hasattr(p, "x"):
+        return float(p.x)
+    if isinstance(p, (int, float)):
+        return float(p)
+    if isinstance(p, (list, tuple)) and len(p) > 0:
+        return float(p[0])
+    return 0.5
+
+
 def get_hand_x(hand_landmarks: Any) -> float:
     """
     Extract horizontal centroid (average x-coordinate) of hand landmarks.
@@ -62,7 +73,53 @@ def get_hand_x(hand_landmarks: Any) -> float:
     if not lms:
         return 0.5
 
-    return sum(float(lm.x) if hasattr(lm, "x") else float(lm[0]) for lm in lms) / len(lms)
+    return sum(_extract_landmark_coord_x(lm) for lm in lms) / len(lms)
+
+
+def _is_hand_sequence(obj: Any) -> bool:
+    """Check if obj is a sequence of hand representations rather than a single hand."""
+    if not isinstance(obj, (list, tuple)):
+        return False
+    if len(obj) == 0:
+        return True
+    first = obj[0]
+    # If the first element is a hand object (has landmark attribute)
+    if hasattr(first, "landmark"):
+        return True
+    # If it contains <= 2 elements (MediaPipe hands have 21 landmarks, so 1 or 2 items are hand representations)
+    if len(obj) <= 2:
+        return True
+    return False
+
+
+def _resolve_hands(
+    leftmost_hand: Any = None,
+    rightmost_hand: Any = None,
+    hands: Optional[Sequence[Any]] = None,
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """
+    Resolve leftmost and rightmost hand representations from various call patterns:
+    - update(leftmost, rightmost)
+    - update(leftmost)
+    - update(hands=[h1, h2]) or update(hands=[h1]) or update(hands=[])
+    - update([h1, h2]) or update([h1]) or update([])
+    - update(rightmost_hand=h)
+    """
+    hand_seq = None
+    if hands is not None:
+        hand_seq = hands
+    elif _is_hand_sequence(leftmost_hand):
+        hand_seq = leftmost_hand
+
+    if hand_seq is not None:
+        l_hand = hand_seq[0] if len(hand_seq) >= 1 else None
+        r_hand = hand_seq[-1] if len(hand_seq) >= 2 else None
+        return l_hand, r_hand
+
+    if leftmost_hand is None and rightmost_hand is not None:
+        return rightmost_hand, None
+
+    return leftmost_hand, rightmost_hand
 
 
 def apply_deadzone(val: float, deadzone: float = STEER_DEADZONE) -> float:
@@ -143,31 +200,26 @@ class DrivingController:
             hand_x = (get_hand_x(leftmost_hand) + get_hand_x(rightmost_hand)) / 2.0.
         When one hand is present, calibrates to that hand's position:
             hand_x = get_hand_x(leftmost_hand).
-        Immediately recenters smoothed steering to 0.
+        Immediately recenters smoothed steering to 0 and clears steering keys.
+        If no hands are present, returns current neutral_x unchanged.
         """
-        if hands is not None:
-            if len(hands) >= 2:
-                hand_x = (get_hand_x(hands[0]) + get_hand_x(hands[-1])) / 2.0
-            elif len(hands) == 1:
-                hand_x = get_hand_x(hands[0])
-            else:
-                return self.neutral_x
-        elif rightmost_hand is not None:
-            if hand_or_x is not None:
-                hand_x = (get_hand_x(hand_or_x) + get_hand_x(rightmost_hand)) / 2.0
-            else:
-                hand_x = get_hand_x(rightmost_hand)
-        elif hand_or_x is not None:
-            # Check if hand_or_x is a sequence of hands (list/tuple of hands, not landmarks of 1 hand)
-            if isinstance(hand_or_x, (list, tuple)) and len(hand_or_x) >= 2 and (
-                hasattr(hand_or_x[0], "landmark")
-                or (isinstance(hand_or_x[0], (list, tuple)) and len(hand_or_x[0]) > 2)
-            ):
-                hand_x = (get_hand_x(hand_or_x[0]) + get_hand_x(hand_or_x[-1])) / 2.0
-            else:
-                hand_x = get_hand_x(hand_or_x)
-        else:
+        # Check if empty sequence was passed -> keep existing neutral_x
+        if (hands is not None and len(hands) == 0) or (
+            hand_or_x is not None and isinstance(hand_or_x, (list, tuple)) and len(hand_or_x) == 0
+        ):
             return self.neutral_x
+
+        left_h, right_h = _resolve_hands(hand_or_x, rightmost_hand, hands)
+
+        if left_h is None and right_h is None:
+            return self.neutral_x
+
+        if left_h is not None and right_h is not None:
+            hand_x = (get_hand_x(left_h) + get_hand_x(right_h)) / 2.0
+        elif left_h is not None:
+            hand_x = get_hand_x(left_h)
+        else:
+            hand_x = get_hand_x(right_h)
 
         self.neutral_x = float(hand_x)
         self.hand_x = float(hand_x)
@@ -189,20 +241,17 @@ class DrivingController:
         Update controller state for current frame.
 
         Args:
-            leftmost_hand: Detected leftmost hand landmarks.
+            leftmost_hand: Detected leftmost hand landmarks (or single hand, or sequence of hands).
             rightmost_hand: Detected rightmost hand landmarks.
             hands: Optional sequence of hands if not pre-separated.
 
         Returns:
             Current DrivingState.
         """
-        # Resolve hands if passed as a sequence
-        if hands is not None and leftmost_hand is None and rightmost_hand is None:
-            leftmost_hand = hands[0] if len(hands) >= 1 else None
-            rightmost_hand = hands[-1] if len(hands) >= 2 else None
+        leftmost_hand, rightmost_hand = _resolve_hands(leftmost_hand, rightmost_hand, hands)
 
-        # Tracking-loss handling
-        if leftmost_hand is None:
+        # Tracking-loss handling (when 0 hands are detected)
+        if leftmost_hand is None and rightmost_hand is None:
             if not self._has_seen_hand:
                 self.smoothed_steering = 0.0
                 self.raw_steering = 0.0
@@ -222,15 +271,6 @@ class DrivingController:
                 self.state = DrivingState.NEUTRAL
                 return self.state
 
-            # Within grace period (1 <= loss_frame_count < loss_frames_limit)
-            if rightmost_hand is not None and is_open_palm(rightmost_hand):
-                self.state = DrivingState.BRAKING
-                active = ["s"]
-                if self.smoothed_steering < -self.steer_fire_threshold:
-                    active.append("a")
-                elif self.smoothed_steering > self.steer_fire_threshold:
-                    active.append("d")
-                self.active_keys = sorted(active)
             return self.state
 
         # At least one hand is present
@@ -238,12 +278,14 @@ class DrivingController:
         self._has_seen_hand = True
 
         # Calculate steering position
-        if rightmost_hand is not None:
+        if leftmost_hand is not None and rightmost_hand is not None:
             # Two hands detected: horizontal midpoint of both hands
             hand_x = (get_hand_x(leftmost_hand) + get_hand_x(rightmost_hand)) / 2.0
-        else:
-            # Single hand detected: use that single hand's x-coordinate
+        elif leftmost_hand is not None:
+            # Single hand detected
             hand_x = get_hand_x(leftmost_hand)
+        else:
+            hand_x = get_hand_x(rightmost_hand)
         self.hand_x = hand_x
 
         self.raw_steering = calculate_raw_steering(
@@ -263,13 +305,13 @@ class DrivingController:
             self.smoothed_steering = 0.0
 
         # Evaluate gestures
-        left_fist = is_fist(leftmost_hand)
-        left_palm = is_open_palm(leftmost_hand)
+        left_fist = is_fist(leftmost_hand) if leftmost_hand is not None else False
+        left_palm = is_open_palm(leftmost_hand) if leftmost_hand is not None else False
         right_fist = is_fist(rightmost_hand) if rightmost_hand is not None else False
         right_palm = is_open_palm(rightmost_hand) if rightmost_hand is not None else False
 
         # State machine resolution
-        if rightmost_hand is not None:
+        if leftmost_hand is not None and rightmost_hand is not None:
             # Two hands detected:
             # 1. Both open palms OR one open palm and one fist -> BRAKING (braking priority rule)
             if (left_palm and right_palm) or (left_palm and right_fist) or (left_fist and right_palm):
@@ -282,9 +324,10 @@ class DrivingController:
                 self.state = DrivingState.READY
         else:
             # Single hand detected (backwards compatible):
-            if left_palm:
+            hand = leftmost_hand if leftmost_hand is not None else rightmost_hand
+            if is_open_palm(hand):
                 self.state = DrivingState.BRAKING
-            elif left_fist:
+            elif is_fist(hand):
                 self.state = DrivingState.DRIVING
             else:
                 self.state = DrivingState.READY

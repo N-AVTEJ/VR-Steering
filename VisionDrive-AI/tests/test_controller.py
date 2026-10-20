@@ -1,7 +1,15 @@
 """Tests for KeyboardController and DirectInput key mapping."""
 
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+
+# Ensure VisionDrive-AI root is on sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.controller import KeyboardController
 
 

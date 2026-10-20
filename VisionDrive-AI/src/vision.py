@@ -43,10 +43,24 @@ class Vision:
     @staticmethod
     def _calc_hand_centroid_x(hand: Any) -> float:
         """Compute the horizontal centroid of hand landmarks."""
+        if hand is None:
+            return 0.0
+        if isinstance(hand, (int, float)):
+            return float(hand)
         lms = hand.landmark if hasattr(hand, "landmark") else hand
         if not lms:
             return 0.0
-        return sum(float(lm.x) if hasattr(lm, "x") else float(lm[0]) for lm in lms) / len(lms)
+
+        def _get_x(p: Any) -> float:
+            if hasattr(p, "x"):
+                return float(p.x)
+            if isinstance(p, (int, float)):
+                return float(p)
+            if isinstance(p, (list, tuple)) and len(p) > 0:
+                return float(p[0])
+            return 0.0
+
+        return sum(_get_x(lm) for lm in lms) / len(lms)
 
     def process(self, frame: Optional[np.ndarray]) -> List:
         """

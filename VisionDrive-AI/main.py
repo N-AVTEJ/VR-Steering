@@ -220,6 +220,14 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
+                # Draw neutral center guide tick mark and hand marker on frame
+                h_frame, w_frame = frame.shape[:2]
+                neut_px = int(driving_controller.neutral_x * w_frame)
+                hand_px = int(h_x * w_frame)
+                cv2.line(frame, (neut_px, 0), (neut_px, 25), (100, 255, 100), 2)
+                cv2.circle(frame, (hand_px, int(h_frame / 2)), 8, (0, 255, 255), -1)
+                cv2.line(frame, (hand_px, int(h_frame / 2) - 15), (hand_px, int(h_frame / 2) + 15), (0, 255, 255), 2)
+
             # Instructions overlay at bottom
             cv2.putText(
                 frame,

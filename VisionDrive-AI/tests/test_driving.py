@@ -1,6 +1,13 @@
 """Tests for driving controller, steering calibration math, thresholds, and tracking loss."""
 
+import sys
+from pathlib import Path
 import pytest
+
+# Ensure VisionDrive-AI root is on sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 from src.config import (
     EMA_ALPHA,
     LOSS_FRAMES_LIMIT,
@@ -525,4 +532,84 @@ class TestTwoHandSteeringAndGestures:
         assert st_single == DRIVING
         assert controller.hand_x == pytest.approx(0.3)
         assert controller.smoothed_steering == pytest.approx(-0.2)
+
+    def test_calibrate_empty_sequence_preserves_neutral_x(self):
+        controller = DrivingController(neutral_x=0.35)
+        # Positional empty sequence
+        res1 = controller.calibrate([])
+        assert res1 == pytest.approx(0.35)
+        assert controller.neutral_x == pytest.approx(0.35)
+
+        # Keyword empty sequence
+        res2 = controller.calibrate(hands=[])
+        assert res2 == pytest.approx(0.35)
+        assert controller.neutral_x == pytest.approx(0.35)
+
+    def test_calibrate_single_hand_in_list(self):
+        controller = DrivingController(neutral_x=0.5)
+        res = controller.calibrate([MockHand(x=0.65)])
+        assert res == pytest.approx(0.65)
+        assert controller.neutral_x == pytest.approx(0.65)
+
+        # Single float in list
+        res_float = controller.calibrate([0.42])
+        assert res_float == pytest.approx(0.42)
+        assert controller.neutral_x == pytest.approx(0.42)
+
+    def test_calibrate_coordinates_list(self):
+        controller = DrivingController(neutral_x=0.5)
+        res = controller.calibrate([0.30, 0.70])
+        assert res == pytest.approx(0.50)
+        assert controller.neutral_x == pytest.approx(0.50)
+
+    def test_update_positional_hand_sequence(self):
+        controller = DrivingController(neutral_x=0.5, steer_sensitivity=1.0, ema_alpha=1.0, steer_deadzone=0.0)
+
+        # Positional 2-hand sequence
+        h1 = MockHand(x=0.3, gesture="fist")
+        h2 = MockHand(x=0.7, gesture="fist")
+        st = controller.update([h1, h2])
+        assert st == DRIVING
+        assert controller.hand_x == pytest.approx(0.5)
+        assert "w" in controller.get_active_keys()
+
+        # Positional 1-hand sequence
+        st_palm = controller.update([MockHand(x=0.4, gesture="palm")])
+        assert st_palm == BRAKING
+        assert controller.hand_x == pytest.approx(0.4)
+        assert "s" in controller.get_active_keys()
+
+    def test_update_positional_empty_list_triggers_tracking_loss(self):
+        controller = DrivingController(loss_frames_limit=5, neutral_x=0.5)
+        # Establish driving state
+        controller.update(MockHand(x=0.5, gesture="fist"))
+        assert controller.state == DRIVING
+
+        # Update with empty list -> increments loss frame count
+        for i in range(1, 5):
+            controller.update([])
+            assert controller.loss_frame_count == i
+            assert controller.state == DRIVING
+
+        # 5th frame reaches limit -> NEUTRAL
+        controller.update([])
+        assert controller.state == NEUTRAL
+        assert controller.loss_frame_count == 5
+        assert controller.get_active_keys() == []
+
+    def test_update_single_hand_passed_as_rightmost(self):
+        controller = DrivingController(neutral_x=0.5, steer_sensitivity=2.0, ema_alpha=1.0, steer_deadzone=0.0)
+        # Pass hand as rightmost_hand with leftmost_hand=None
+        st = controller.update(rightmost_hand=MockHand(x=0.65, gesture="fist"))
+        assert st == DRIVING
+        assert controller.hand_x == pytest.approx(0.65)
+        assert controller.smoothed_steering == pytest.approx(0.30)
+        assert "w" in controller.get_active_keys()
+
+    def test_get_hand_x_numeric_list(self):
+        from src.driving import get_hand_x
+        assert get_hand_x([0.3, 0.7]) == pytest.approx(0.5)
+        assert get_hand_x([0.45]) == pytest.approx(0.45)
+        assert get_hand_x([]) == 0.5
+
 
