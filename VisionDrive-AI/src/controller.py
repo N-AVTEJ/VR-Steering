@@ -88,22 +88,26 @@ class KeyboardController:
         and never double-presses an already-held key.
         """
         if wanted_keys_set is None:
-            wanted: Set[str] = set()
+            wanted_set: Set[str] = set()
+            wanted_list = []
         else:
-            wanted = {
-                str(k).strip().lower()
-                for k in wanted_keys_set
-                if k is not None and str(k).strip()
-            }
+            wanted_set = set()
+            wanted_list = []
+            for k in wanted_keys_set:
+                if k is not None and str(k).strip():
+                    item = str(k).strip().lower()
+                    if item not in wanted_set:
+                        wanted_set.add(item)
+                        wanted_list.append(item)
 
         # Release keys not in the wanted set first, updating held_keys as each is released
-        to_release = list(self.held_keys - wanted)
+        to_release = list(self.held_keys - wanted_set)
         for key in to_release:
             self.key_up(key)
             self.held_keys.discard(key)
 
         # Press keys newly requested that are not already held, updating held_keys as each is pressed
-        to_press = list(wanted - self.held_keys)
+        to_press = [k for k in wanted_list if k not in self.held_keys]
         for key in to_press:
             self.key_down(key)
             self.held_keys.add(key)

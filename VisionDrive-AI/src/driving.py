@@ -125,21 +125,52 @@ class DrivingController:
 
         self.smoothed_steering: float = 0.0
         self.raw_steering: float = 0.0
+        self.hand_x: float = neutral_x
         self.state: DrivingState = DrivingState.NEUTRAL
         self.loss_frame_count: int = 0
         self.active_keys: List[str] = []
         self._has_seen_hand: bool = False
 
-    def calibrate(self, hand_or_x: Optional[Any] = None) -> float:
+    def calibrate(
+        self,
+        hand_or_x: Optional[Any] = None,
+        rightmost_hand: Optional[Any] = None,
+        hands: Optional[Sequence[Any]] = None,
+    ) -> float:
         """
-        Calibrate neutral_x from current leftmost hand's x-position.
+        Calibrate neutral_x from hand(s) or horizontal position.
+        When two hands are present, calibrates to the midpoint:
+            hand_x = (get_hand_x(leftmost_hand) + get_hand_x(rightmost_hand)) / 2.0.
+        When one hand is present, calibrates to that hand's position:
+            hand_x = get_hand_x(leftmost_hand).
         Immediately recenters smoothed steering to 0.
         """
-        if hand_or_x is None:
+        if hands is not None:
+            if len(hands) >= 2:
+                hand_x = (get_hand_x(hands[0]) + get_hand_x(hands[-1])) / 2.0
+            elif len(hands) == 1:
+                hand_x = get_hand_x(hands[0])
+            else:
+                return self.neutral_x
+        elif rightmost_hand is not None:
+            if hand_or_x is not None:
+                hand_x = (get_hand_x(hand_or_x) + get_hand_x(rightmost_hand)) / 2.0
+            else:
+                hand_x = get_hand_x(rightmost_hand)
+        elif hand_or_x is not None:
+            # Check if hand_or_x is a sequence of hands (list/tuple of hands, not landmarks of 1 hand)
+            if isinstance(hand_or_x, (list, tuple)) and len(hand_or_x) >= 2 and (
+                hasattr(hand_or_x[0], "landmark")
+                or (isinstance(hand_or_x[0], (list, tuple)) and len(hand_or_x[0]) > 2)
+            ):
+                hand_x = (get_hand_x(hand_or_x[0]) + get_hand_x(hand_or_x[-1])) / 2.0
+            else:
+                hand_x = get_hand_x(hand_or_x)
+        else:
             return self.neutral_x
 
-        hand_x = get_hand_x(hand_or_x)
         self.neutral_x = float(hand_x)
+        self.hand_x = float(hand_x)
         self.is_calibrated = True
         self.smoothed_steering = 0.0
         self.raw_steering = 0.0
@@ -158,8 +189,8 @@ class DrivingController:
         Update controller state for current frame.
 
         Args:
-            leftmost_hand: Detected leftmost (steering) hand landmarks.
-            rightmost_hand: Detected rightmost (brake) hand landmarks.
+            leftmost_hand: Detected leftmost hand landmarks.
+            rightmost_hand: Detected rightmost hand landmarks.
             hands: Optional sequence of hands if not pre-separated.
 
         Returns:
@@ -175,6 +206,7 @@ class DrivingController:
             if not self._has_seen_hand:
                 self.smoothed_steering = 0.0
                 self.raw_steering = 0.0
+                self.hand_x = self.neutral_x
                 self.active_keys = []
                 self.state = DrivingState.NEUTRAL
                 self.loss_frame_count = 0
@@ -185,6 +217,7 @@ class DrivingController:
                 # Force smoothed steering to 0 and clear all active outputs
                 self.smoothed_steering = 0.0
                 self.raw_steering = 0.0
+                self.hand_x = self.neutral_x
                 self.active_keys = []
                 self.state = DrivingState.NEUTRAL
                 return self.state
@@ -200,12 +233,19 @@ class DrivingController:
                 self.active_keys = sorted(active)
             return self.state
 
-        # Leftmost hand is present
+        # At least one hand is present
         self.loss_frame_count = 0
         self._has_seen_hand = True
 
-        # Calculate steering
-        hand_x = get_hand_x(leftmost_hand)
+        # Calculate steering position
+        if rightmost_hand is not None:
+            # Two hands detected: horizontal midpoint of both hands
+            hand_x = (get_hand_x(leftmost_hand) + get_hand_x(rightmost_hand)) / 2.0
+        else:
+            # Single hand detected: use that single hand's x-coordinate
+            hand_x = get_hand_x(leftmost_hand)
+        self.hand_x = hand_x
+
         self.raw_steering = calculate_raw_steering(
             hand_x, self.neutral_x, self.steer_sensitivity
         )
@@ -228,24 +268,26 @@ class DrivingController:
         right_fist = is_fist(rightmost_hand) if rightmost_hand is not None else False
         right_palm = is_open_palm(rightmost_hand) if rightmost_hand is not None else False
 
-        # State machine resolution:
-        # Rule 1: Ambiguous input (both fists or both open palms) -> READY (no throttle, no brake)
-        if (leftmost_hand is not None and rightmost_hand is not None) and (
-            (left_fist and right_fist) or (left_palm and right_palm)
-        ):
-            self.state = DrivingState.READY
-
-        # Rule 2: Braking overrides driving (brake hand is open palm)
-        elif right_palm:
-            self.state = DrivingState.BRAKING
-
-        # Rule 3: Driving condition (steering hand is fist)
-        elif left_fist:
-            self.state = DrivingState.DRIVING
-
-        # Rule 4: Hand present, not fist (and not braking) -> READY
+        # State machine resolution
+        if rightmost_hand is not None:
+            # Two hands detected:
+            # 1. Both open palms OR one open palm and one fist -> BRAKING (braking priority rule)
+            if (left_palm and right_palm) or (left_palm and right_fist) or (left_fist and right_palm):
+                self.state = DrivingState.BRAKING
+            # 2. Both closed fists -> DRIVING
+            elif left_fist and right_fist:
+                self.state = DrivingState.DRIVING
+            # 3. Relaxed hands / coasting: neither both fists nor both palms -> READY
+            else:
+                self.state = DrivingState.READY
         else:
-            self.state = DrivingState.READY
+            # Single hand detected (backwards compatible):
+            if left_palm:
+                self.state = DrivingState.BRAKING
+            elif left_fist:
+                self.state = DrivingState.DRIVING
+            else:
+                self.state = DrivingState.READY
 
         # Active virtual keys calculation
         active = []
@@ -275,6 +317,7 @@ class DrivingController:
         """Reset all tracking and state."""
         self.smoothed_steering = 0.0
         self.raw_steering = 0.0
+        self.hand_x = self.neutral_x
         self.state = DrivingState.NEUTRAL
         self.loss_frame_count = 0
         self.active_keys = []
@@ -285,9 +328,13 @@ class DrivingController:
 _default_controller = DrivingController()
 
 
-def calibrate(hand_or_x: Optional[Any] = None) -> float:
-    """Set neutral_x from leftmost hand or x-position using default controller."""
-    return _default_controller.calibrate(hand_or_x)
+def calibrate(
+    hand_or_x: Optional[Any] = None,
+    rightmost_hand: Optional[Any] = None,
+    hands: Optional[Sequence[Any]] = None,
+) -> float:
+    """Set neutral_x from hand(s) or x-position using default controller."""
+    return _default_controller.calibrate(hand_or_x, rightmost_hand, hands)
 
 
 def set_neutral_x(neutral_x: float) -> float:
