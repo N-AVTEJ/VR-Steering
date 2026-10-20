@@ -905,6 +905,40 @@ class TestMainLogic(unittest.TestCase):
 
     @patch("cv2.destroyAllWindows")
     @patch("cv2.imshow")
+    @patch("cv2.waitKey", side_effect=[ord("c"), ord("q")])
+    @patch("main.Camera")
+    @patch("main.Vision")
+    def test_main_keypress_c_calibrates_two_hands(
+        self, mock_vision_cls, mock_camera_cls, mock_waitkey, mock_imshow, mock_destroy
+    ):
+        import main
+
+        mock_cam_inst = MagicMock()
+        mock_cam_inst.read.return_value = (True, np.zeros((480, 640, 3), dtype=np.uint8))
+        mock_camera_cls.return_value = mock_cam_inst
+
+        mock_vis_inst = MagicMock()
+        hand_left = HandLandmarksMock([LandmarkMock(0.25, 0.5) for _ in range(21)])
+        hand_right = HandLandmarksMock([LandmarkMock(0.75, 0.5) for _ in range(21)])
+        mock_vis_inst.process.return_value = [hand_left, hand_right]
+        mock_vision_cls.return_value = mock_vis_inst
+
+        with patch("main.DrivingController") as mock_ctrl_cls:
+            mock_ctrl_inst = MagicMock()
+            mock_ctrl_inst.is_calibrated = False
+            mock_ctrl_inst.neutral_x = 0.5
+            mock_ctrl_inst.smoothed_steering = 0.0
+            mock_ctrl_inst.state = DrivingState.READY
+            mock_ctrl_inst.update.return_value = DrivingState.READY
+            mock_ctrl_inst.get_active_keys.return_value = []
+            mock_ctrl_inst.calibrate.return_value = 0.50
+            mock_ctrl_cls.return_value = mock_ctrl_inst
+
+            main.main()
+            mock_ctrl_inst.calibrate.assert_called_once_with(hand_left, hand_right)
+
+    @patch("cv2.destroyAllWindows")
+    @patch("cv2.imshow")
     @patch("cv2.waitKey", return_value=ord("q"))
     @patch("main.Camera")
     @patch("main.Vision")
