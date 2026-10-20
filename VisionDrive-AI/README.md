@@ -6,26 +6,32 @@ AI-powered vision-based vehicle steering and throttle control system using a sta
 
 ## Features
 
-- **Gesture-Based Throttle & Brake**: Accelerate with a closed fist on your steering hand; brake instantaneously by raising an open palm with your secondary hand (braking always overrides acceleration).
-- **Spatial Steering with EMA Smoothing**: Steer left and right by moving your hand horizontally across the camera frame, smoothed by an Exponential Moving Average filter with deadzone rejection.
+- **Dual-Hand & Single-Hand Steering with EMA Smoothing**: Steer left and right naturally like holding a physical steering wheel. When 2 hands are detected, steering is computed from the horizontal midpoint of both hands: `(hand_left_x + hand_right_x) / 2.0`. When 1 hand is detected, steering maps directly from that hand. Smoothed by an Exponential Moving Average filter with deadzone rejection.
+- **Dual-Hand & Single-Hand Gesture Throttle & Brake**:
+  - **Two Hands Detected**: Close both hands into fists to drive/accelerate (`W`); open both hands into palms to brake (`S`). Braking priority is preserved: if one hand is open palm and the other is a fist, braking overrides driving. Relaxing hands allows smooth coasting in `READY` (no throttle, no brake).
+  - **Single Hand Detected**: Close fist to accelerate (`W`), open palm to brake (`S`), or relax to coast in `READY`.
 - **DirectInput Hardware Key Pressing**: Powered by `pydirectinput` for game compatibility, with automatic stuck-key prevention (`release_all` on normal exit, camera disconnect, or `Ctrl+C`).
-- **One-Key Neutral Calibration**: Center your steering hand anywhere in the camera frame and press `c` to calibrate your neutral position on the fly.
+- **One-Key Neutral Calibration**: Hold your hands anywhere in your natural driving position and press `c` to calibrate your neutral position on the fly (automatically centers on the midpoint when 2 hands are present, or on the single hand position).
 - **Fail-Safe & Grace Periods**: Grace period for temporary hand occlusion, resetting safely to `NEUTRAL` and releasing all held keys if tracking is lost or the camera disconnects.
 
 ---
 
 ## Control Mapping Table
 
-| Hand / Gesture | Condition | Driving State | Virtual Key | Action |
+| Mode / Gesture | Condition | Driving State | Virtual Key | Action |
 |---|---|---|---|---|
-| **Left Hand: Closed Fist** | Curled finger count $\ge 3$ | `DRIVING` | `W` | Accelerate / Drive Forward |
-| **Right Hand: Open Palm** | Extended finger count $\ge 3$ | `BRAKING` | `S` | Brake / Reverse (overrides Drive) |
-| **Left Hand: Steer Left** | Position $< \text{neutral\_x} - \text{threshold}$ | `DRIVING` / `READY` / `BRAKING` | `A` | Steer Left |
-| **Left Hand: Steer Right** | Position $> \text{neutral\_x} + \text{threshold}$ | `DRIVING` / `READY` / `BRAKING` | `D` | Steer Right |
-| **Both Fists or Both Palms** | Conflicting / ambiguous inputs | `READY` | None | Coast / Neutral Throttle & Brake |
-| **Left Hand Relaxed** | Neither fist nor open palm | `READY` | None | Coast / Ready |
+| **Two Hands: Both Closed Fists** | Both hands curled $\ge 3$ fingers | `DRIVING` | `W` | Accelerate / Drive Forward |
+| **Two Hands: Both Open Palms** | Both hands extended $\ge 3$ fingers | `BRAKING` | `S` | Brake / Reverse |
+| **Two Hands: One Palm + One Fist** | One palm, one fist | `BRAKING` | `S` | Brake / Reverse (Braking Priority Override) |
+| **Two Hands: Move Midpoint Left** | Midpoint $< \text{neutral\_x} - \text{threshold}$ | `DRIVING` / `READY` / `BRAKING` | `A` | Steer Left |
+| **Two Hands: Move Midpoint Right** | Midpoint $> \text{neutral\_x} + \text{threshold}$ | `DRIVING` / `READY` / `BRAKING` | `D` | Steer Right |
+| **Two Hands: Relaxed Hands** | Neither both fists nor both palms | `READY` | None | Coast / Ready |
+| **Single Hand: Closed Fist** | Curled finger count $\ge 3$ | `DRIVING` | `W` | Accelerate / Drive Forward |
+| **Single Hand: Open Palm** | Extended finger count $\ge 3$ | `BRAKING` | `S` | Brake / Reverse |
+| **Single Hand: Steer Left / Right** | Hand $x \lessgtr \text{neutral\_x} \pm \text{threshold}$ | `DRIVING` / `READY` / `BRAKING` | `A` / `D` | Steer Left / Right |
+| **Single Hand: Relaxed** | Neither fist nor open palm | `READY` | None | Coast / Ready |
 | **Tracking Lost** | $> 8$ consecutive frames lost | `NEUTRAL` | None | All keys released immediately |
-| **Keyboard 'c' / 'C'** | Active video window | Calibration | — | Set current hand $x$ as neutral center |
+| **Keyboard 'c' / 'C'** | Active video window | Calibration | — | Set neutral center (midpoint if 2 hands, hand $x$ if 1 hand) |
 | **Keyboard 'q' / 'Q'** | Active video window | Shutdown | — | Clean exit (releases all keys & camera) |
 
 ---
@@ -73,11 +79,11 @@ AI-powered vision-based vehicle steering and throttle control system using a sta
 ## Calibration Instructions
 
 1. Sit in your normal, comfortable driving position in front of your camera.
-2. Raise your steering hand (leftmost hand in your camera view) to where you naturally rest it when driving straight.
+2. Hold both hands up as if gripping a virtual steering wheel (or raise a single hand if driving one-handed).
 3. Tap the **`c`** key on your keyboard while the VisionDrive-AI window is focused.
 4. The HUD and terminal will confirm:
    ```
-   [CALIBRATION] Neutral X calibrated to: 0.485
+   [CALIBRATION] Neutral X calibrated to: 0.500
    ```
 5. Your steering offset is now zeroed to your natural rest position. You can recalibrate at any time during gameplay without restarting the application.
 
