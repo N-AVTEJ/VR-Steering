@@ -13,16 +13,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.camera import Camera
 from src.vision import Vision
 from src.gestures import is_fist, is_open_palm
-from src.driving import DrivingController, DrivingState
+from src.driving import DrivingController, DrivingState, get_hand_x
 from src.controller import KeyboardController
 
 
-def _get_hand_x(hand_landmarks) -> float:
-    """Compute average horizontal position of hand landmarks."""
-    lms = hand_landmarks.landmark if hasattr(hand_landmarks, "landmark") else hand_landmarks
-    if not lms:
-        return 0.5
-    return sum(float(lm.x) if hasattr(lm, "x") else float(lm[0]) for lm in lms) / len(lms)
+_get_hand_x = get_hand_x
 
 
 def main() -> None:
@@ -78,23 +73,42 @@ def main() -> None:
             controller.apply(active_keys)
             keys_str = ", ".join(active_keys) if active_keys else "None"
 
-            # Console output
-            left_str = (
-                f"Fist: {is_fist(leftmost)!s:<5} Palm: {is_open_palm(leftmost)!s:<5}"
-                if leftmost is not None
-                else "None"
-            )
-            right_str = (
-                f"Fist: {is_fist(rightmost)!s:<5} Palm: {is_open_palm(rightmost)!s:<5}"
-                if rightmost is not None
-                else "None"
-            )
-            print(
-                f"[Hands: {len(hands)}] State: {state.value:<7} | "
-                f"Steer: {smoothed_steer:+.2f} | "
-                f"Keys: [{keys_str}] | "
-                f"Left -> {left_str} | Right -> {right_str} | FPS: {fps:.1f}"
-            )
+            # Hand tracking information and dual gesture status
+            num_hands = len(hands)
+            left_f = is_fist(leftmost) if leftmost is not None else False
+            left_p = is_open_palm(leftmost) if leftmost is not None else False
+            right_f = is_fist(rightmost) if rightmost is not None else False
+            right_p = is_open_palm(rightmost) if rightmost is not None else False
+
+            if num_hands >= 2:
+                mid_x = (get_hand_x(leftmost) + get_hand_x(rightmost)) / 2.0
+                left_stat = "FIST" if left_f else ("PALM" if left_p else "RELAXED")
+                right_stat = "FIST" if right_f else ("PALM" if right_p else "RELAXED")
+                if (left_p and right_p) or (left_p and right_f) or (left_f and right_p):
+                    dual_gesture_desc = "BRAKE"
+                elif left_f and right_f:
+                    dual_gesture_desc = "DRIVE"
+                else:
+                    dual_gesture_desc = "COAST"
+
+                print(
+                    f"[Hands: {num_hands}] Midpoint X: {mid_x:.3f} | State: {state.value:<7} | "
+                    f"Steer: {smoothed_steer:+.2f} | Keys: [{keys_str}] | "
+                    f"Dual: {dual_gesture_desc} (L:{left_stat}, R:{right_stat}) | FPS: {fps:.1f}"
+                )
+            elif num_hands == 1:
+                h_x = get_hand_x(leftmost)
+                h_stat = "FIST" if left_f else ("PALM" if left_p else "RELAXED")
+                print(
+                    f"[Hands: 1] Hand X: {h_x:.3f} | State: {state.value:<7} | "
+                    f"Steer: {smoothed_steer:+.2f} | Keys: [{keys_str}] | "
+                    f"Gesture: {h_stat} | FPS: {fps:.1f}"
+                )
+            else:
+                print(
+                    f"[Hands: 0] State: {state.value:<7} | "
+                    f"Steer: {smoothed_steer:+.2f} | Keys: [{keys_str}] | FPS: {fps:.1f}"
+                )
 
             # Draw landmarks on frame
             vision.draw_landmarks(frame, hands)
@@ -134,7 +148,15 @@ def main() -> None:
                 cv2.LINE_AA,
             )
 
-            steer_text = f"STEER: {smoothed_steer:+.2f} (Neutral: {driving_controller.neutral_x:.2f})"
+            if num_hands >= 2:
+                mid_x = (get_hand_x(leftmost) + get_hand_x(rightmost)) / 2.0
+                steer_text = f"STEER: {smoothed_steer:+.2f} (Midpoint: {mid_x:.2f}, Neutral: {driving_controller.neutral_x:.2f})"
+            elif num_hands == 1:
+                h_x = get_hand_x(leftmost)
+                steer_text = f"STEER: {smoothed_steer:+.2f} (Hand: {h_x:.2f}, Neutral: {driving_controller.neutral_x:.2f})"
+            else:
+                steer_text = f"STEER: {smoothed_steer:+.2f} (Neutral: {driving_controller.neutral_x:.2f})"
+
             cv2.putText(
                 frame,
                 steer_text,
@@ -158,34 +180,42 @@ def main() -> None:
                 cv2.LINE_AA,
             )
 
-            # Gesture status overlay on the video window
-            if leftmost is not None:
-                l_f = is_fist(leftmost)
-                l_p = is_open_palm(leftmost)
-                status_l = f"L (Steer): {'FIST' if l_f else ('PALM' if l_p else 'NONE')}"
+            # Dual-hand / single-hand gesture status overlay on video window
+            if num_hands >= 2:
+                left_stat = "FIST" if left_f else ("PALM" if left_p else "RELAXED")
+                right_stat = "FIST" if right_f else ("PALM" if right_p else "RELAXED")
+                status_dual = f"DUAL: {dual_gesture_desc} (L: {left_stat} | R: {right_stat})"
                 cv2.putText(
                     frame,
-                    status_l,
+                    status_dual,
                     (15, 170),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (200, 200, 200),
-                    1,
+                    state_color,
+                    2,
                     cv2.LINE_AA,
                 )
 
-            if rightmost is not None:
-                r_f = is_fist(rightmost)
-                r_p = is_open_palm(rightmost)
-                status_r = f"R (Brake): {'FIST' if r_f else ('PALM' if r_p else 'NONE')}"
-                y_pos = 195 if leftmost is not None else 170
+                # Draw tracking midpoint marker and neutral guide on frame
+                h_frame, w_frame = frame.shape[:2]
+                mid_px = int(mid_x * w_frame)
+                neut_px = int(driving_controller.neutral_x * w_frame)
+                # Neutral center guide tick mark (top)
+                cv2.line(frame, (neut_px, 0), (neut_px, 25), (100, 255, 100), 2)
+                # Current midpoint marker
+                cv2.circle(frame, (mid_px, int(h_frame / 2)), 8, (0, 255, 255), -1)
+                cv2.line(frame, (mid_px, int(h_frame / 2) - 15), (mid_px, int(h_frame / 2) + 15), (0, 255, 255), 2)
+
+            elif num_hands == 1:
+                h_stat = "FIST (DRIVE)" if left_f else ("PALM (BRAKE)" if left_p else "RELAXED (COAST)")
+                status_single = f"HAND: {h_stat}"
                 cv2.putText(
                     frame,
-                    status_r,
-                    (15, y_pos),
+                    status_single,
+                    (15, 170),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (200, 200, 200),
+                    state_color,
                     1,
                     cv2.LINE_AA,
                 )
@@ -211,8 +241,13 @@ def main() -> None:
                 print("Quit requested by user.")
                 break
             elif key in (ord("c"), ord("C")):
-                calib_hand = leftmost if leftmost is not None else (hands[0] if hands else None)
-                if calib_hand is not None:
+                if len(hands) >= 2:
+                    new_neutral = driving_controller.calibrate(leftmost, rightmost)
+                    if controller is not None:
+                        controller.apply(driving_controller.get_active_keys())
+                    print(f"[CALIBRATION] Neutral X calibrated to: {new_neutral:.3f}")
+                elif len(hands) == 1:
+                    calib_hand = leftmost if leftmost is not None else hands[0]
                     new_neutral = driving_controller.calibrate(calib_hand)
                     if controller is not None:
                         controller.apply(driving_controller.get_active_keys())

@@ -547,12 +547,19 @@ class TestDriving(unittest.TestCase):
 
     def test_state_machine_braking_open_palm(self):
         ctrl = DrivingController()
-        left_hand = create_test_hand(x=0.3, gesture="relaxed")
+        left_palm = create_test_hand(x=0.3, gesture="palm")
         right_palm = create_test_hand(x=0.7, gesture="palm")
-        ctrl.update(leftmost_hand=left_hand, rightmost_hand=right_palm)
+        ctrl.update(leftmost_hand=left_palm, rightmost_hand=right_palm)
         self.assertEqual(ctrl.state, DrivingState.BRAKING)
         self.assertIn("s", ctrl.active_keys)
         self.assertNotIn("w", ctrl.active_keys)
+
+        # Single-hand backwards compatibility: 1 palm -> BRAKING
+        ctrl_single = DrivingController()
+        single_palm = create_test_hand(x=0.5, gesture="palm")
+        ctrl_single.update(leftmost_hand=single_palm, rightmost_hand=None)
+        self.assertEqual(ctrl_single.state, DrivingState.BRAKING)
+        self.assertIn("s", ctrl_single.active_keys)
 
     def test_state_machine_braking_overrides_driving(self):
         # Both fist condition (steering hand) and brake condition (brake hand) true
@@ -565,25 +572,25 @@ class TestDriving(unittest.TestCase):
         self.assertIn("s", ctrl.active_keys)
         self.assertNotIn("w", ctrl.active_keys)
 
-    def test_state_machine_ambiguous_both_fists_shows_ready(self):
+    def test_state_machine_both_fists_shows_driving(self):
         ctrl = DrivingController()
         left_fist = create_test_hand(x=0.3, gesture="fist")
         right_fist = create_test_hand(x=0.7, gesture="fist")
         ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_fist)
-        # Both fists -> ambiguous input -> READY (no throttle, no brake)
-        self.assertEqual(ctrl.state, DrivingState.READY)
-        self.assertNotIn("w", ctrl.active_keys)
+        # Both fists -> dual-hand drive -> DRIVING (presses 'w')
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+        self.assertIn("w", ctrl.active_keys)
         self.assertNotIn("s", ctrl.active_keys)
 
-    def test_state_machine_ambiguous_both_palms_shows_ready(self):
+    def test_state_machine_both_palms_shows_braking(self):
         ctrl = DrivingController()
         left_palm = create_test_hand(x=0.3, gesture="palm")
         right_palm = create_test_hand(x=0.7, gesture="palm")
         ctrl.update(leftmost_hand=left_palm, rightmost_hand=right_palm)
-        # Both palms -> ambiguous input -> READY (no throttle, no brake)
-        self.assertEqual(ctrl.state, DrivingState.READY)
+        # Both palms -> dual-hand brake -> BRAKING (presses 's')
+        self.assertEqual(ctrl.state, DrivingState.BRAKING)
+        self.assertIn("s", ctrl.active_keys)
         self.assertNotIn("w", ctrl.active_keys)
-        self.assertNotIn("s", ctrl.active_keys)
 
     def test_state_machine_initial_neutral_before_any_hand(self):
         ctrl = DrivingController()
@@ -615,8 +622,12 @@ class TestDriving(unittest.TestCase):
         ctrl.update(leftmost_hand=left_fist, rightmost_hand=None)
         self.assertEqual(ctrl.state, DrivingState.DRIVING)
 
-        # 5. Transition DRIVING -> READY (right hand closes into fist -> both fists)
+        # 5. Transition DRIVING (right hand closes into fist -> both fists)
         ctrl.update(leftmost_hand=left_fist, rightmost_hand=right_fist)
+        self.assertEqual(ctrl.state, DrivingState.DRIVING)
+
+        # 6. Transition DRIVING -> READY (relaxing hand to coast)
+        ctrl.update(leftmost_hand=left_relaxed, rightmost_hand=right_fist)
         self.assertEqual(ctrl.state, DrivingState.READY)
 
     def test_camera_covered_30_frames_forces_neutral(self):
@@ -674,10 +685,10 @@ class TestDriving(unittest.TestCase):
         self.assertEqual(ctrl.active_keys, ["a", "w"])
 
         # BRAKING + steer right -> ['d', 's']
-        hand_steer_right = create_test_hand(x=0.8, gesture="relaxed")
-        hand_brake = create_test_hand(x=0.7, gesture="palm")
+        hand_brake_left = create_test_hand(x=0.8, gesture="palm")
+        hand_brake_right = create_test_hand(x=0.8, gesture="palm")
         for _ in range(15):
-            ctrl.update(leftmost_hand=hand_steer_right, rightmost_hand=hand_brake)
+            ctrl.update(leftmost_hand=hand_brake_left, rightmost_hand=hand_brake_right)
         self.assertEqual(ctrl.state, DrivingState.BRAKING)
         self.assertEqual(ctrl.active_keys, ["d", "s"])
 
